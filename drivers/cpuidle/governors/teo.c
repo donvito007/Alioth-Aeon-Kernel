@@ -284,7 +284,7 @@ static int teo_find_shallower_state(struct cpuidle_driver *drv,
  * @dev: Target CPU.
  * @stop_tick: Indication on whether or not to stop the scheduler tick.
  */
-static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev)
+static int teo_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,bool *dummy)
 {
 	struct teo_cpu *cpu_data = per_cpu_ptr(&teo_cpus, dev->cpu);
 	s64 latency_req = cpuidle_governor_latency_req(dev->cpu);
