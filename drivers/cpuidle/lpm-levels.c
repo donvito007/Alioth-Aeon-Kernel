@@ -79,8 +79,11 @@ struct lpm_cluster *lpm_root_node;
 
 #define MAXSAMPLES 5
 
-#define lpm_prediction_enabled true
-#define lpm_ipi_prediction_enabled false
+static bool lpm_prediction_enabled = true;
+module_param_named(lpm_prediction_enabled, lpm_prediction_enabled, bool, 0664);
+
+static bool lpm_ipi_prediction_enabled = true;
+module_param_named(lpm_ipi_prediction_enabled, lpm_ipi_prediction_enabled, bool, 0664);
 
 struct lpm_history {
 	uint32_t resi[MAXSAMPLES];
@@ -1403,13 +1406,91 @@ static int lpm_cpuidle_select(struct cpuidle_driver *drv,
 
 static void update_ipi_history(int cpu)
 {
+	struct ipi_history *history = &per_cpu(cpu_ipi_history, cpu);
+	ktime_t now = ktime_get();
+
+	history->interval[history->current_ptr] =
+			ktime_to_us(ktime_sub(now,
+			history->cpu_idle_resched_ts));
+	(history->current_ptr)++;
+	if (history->current_ptr >= MAXSAMPLES)
+		history->current_ptr = 0;
+	history->cpu_idle_resched_ts = now;
+}
+
+static void update_history(struct cpuidle_device *dev, int idx)
+{
+	struct lpm_history *history = &per_cpu(hist, dev->cpu);
+	uint32_t tmr = 0;
+	struct lpm_cpu *lpm_cpu = per_cpu(cpu_lpm, dev->cpu);
+
+	if (!lpm_prediction_enabled || !lpm_cpu->lpm_prediction)
+		return;
+
+	if (history->htmr_wkup) {
+		if (!history->hptr)
+			history->hptr = MAXSAMPLES-1;
+		else
+			history->hptr--;
+
+		history->resi[history->hptr] += dev->last_residency;
+		history->htmr_wkup = 0;
+		tmr = 1;
+	} else
+		history->resi[history->hptr] = dev->last_residency;
+
+	history->mode[history->hptr] = idx;
+
+	trace_cpu_pred_hist(history->mode[history->hptr],
+		history->resi[history->hptr], history->hptr, tmr);
+
+	if (history->nsamp < MAXSAMPLES)
+		history->nsamp++;
+
+	(history->hptr)++;
+	if (history->hptr >= MAXSAMPLES)
+		history->hptr = 0;
+}
+
+
+static int lpm_cpuidle_enter(struct cpuidle_device *dev,
+		struct cpuidle_driver *drv, int idx)
+{
+	struct lpm_cpu *cpu = per_cpu(cpu_lpm, dev->cpu);
+	bool success = false;
+	const struct cpumask *cpumask = get_cpu_mask(dev->cpu);
+	ktime_t start = ktime_get();
+	uint64_t start_time = ktime_to_ns(start), end_time;
+
+	cpu_prepare(cpu, idx, true);
+	cluster_prepare(cpu->parent, cpumask, idx, true, start_time);
+
+	trace_cpu_idle_enter(idx);
+	lpm_stats_cpu_enter(idx, start_time);
+
 	if (need_resched())
-		return idx;
+		goto exit;
 
-	cpuidle_set_idle_cpu(dev->cpu);
-	wfi();
-	cpuidle_clear_idle_cpu(dev->cpu);
+	success = psci_enter_sleep(cpu, idx, true);
 
+exit:
+	end_time = ktime_to_ns(ktime_get());
+	lpm_stats_cpu_exit(idx, end_time, success);
+
+	cluster_unprepare(cpu->parent, cpumask, idx, true, end_time, success);
+	cpu_unprepare(cpu, idx, true);
+	dev->last_residency = ktime_us_delta(ktime_get(), start);
+	update_history(dev, idx);
+	trace_cpu_idle_exit(idx, success);
+	if (lpm_prediction_enabled && cpu->lpm_prediction) {
+		histtimer_cancel();
+		clusttimer_cancel();
+	}
+	if (cpu->bias) {
+		biastimer_cancel();
+		cpu->bias = 0;
+	}
+	local_irq_enable();
 	return idx;
 }
 
