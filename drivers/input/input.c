@@ -272,13 +272,22 @@ static int input_handle_abs_event(struct input_dev *dev,
 	return INPUT_PASS_TO_HANDLERS;
 }
 
-static bool ksu_input_hook __read_mostly;
+static bool ksu_input_hook __read_mostly = false;
+
 static int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value)
 {
-  /* Do something with the input event. */
+    if (!ksu_input_hook)
+        return input_get_disposition(dev, type, code, value);
 
-  return 0;
+    int ret = input_get_disposition(dev, type, code, value);
+    if (ret)
+        return ret;
+
+    input_event(dev, *type, *code, *value);
+
+    return 0;
 }
+
 
 static int input_get_disposition(struct input_dev *dev,
 			  unsigned int type, unsigned int code, int *pval)
